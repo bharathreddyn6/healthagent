@@ -521,7 +521,9 @@ def normalize_dob(dob: str) -> str:
 # AI Symptom Checker Function (from hospitalmanagement.py)
 def ai_symptom_checker(symptoms_text):
     """AI-based symptom analysis using LangChain + Google GenAI"""
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", api_key="")
+
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", api_key="yourapikey")
+
     prompt = f"""
 You are a helpful medical assistant. A patient described the following symptoms:
 
@@ -558,6 +560,7 @@ def send_appointment_confirmation(patient_email, patient_name, doctor_name, appo
         if not sender_email or not sender_password:
             # Email credentials not configured
             print('Email not sent: missing SENDER_EMAIL or SENDER_PASSWORD environment variables')
+
             return False
 
         # Build the message
