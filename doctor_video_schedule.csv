@@ -1,0 +1,9 @@
+doctor,date,time_slot,status
+Dr. Smith,2025-10-25,09:00,Available
+Dr. Smith,2025-10-25,10:00,Available
+Dr. Jones,2025-10-26,14:00,Available
+Dr. Lee,2025-10-27,11:00,Booked
+Dr. Lee,2025-10-27,15:00,Available
+Dr. Patel,2025-10-28,09:30,Available
+Dr. Patel,2025-10-28,10:30,Available
+Dr. Nguyen,2025-10-29,16:00,Available
