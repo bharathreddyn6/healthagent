@@ -33,11 +33,11 @@ regex>=2023.6.0
 email-validator>=2.0.0
 
 # Authentication & Security
-hashlib2>=1.0.1
-bcrypt>=4.0.0
+# hashlib is part of the Python standard library (no pip package required)
+bcrypt
 
 # Database (Optional - for future use)
-sqlite3
+# sqlite3 is part of the Python standard library (no pip package required)
 
 # Image Processing (Optional)
 Pillow>=9.5.0

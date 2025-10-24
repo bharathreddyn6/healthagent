@@ -1,7 +1,15 @@
 import streamlit as st
 import pandas as pd
 import re
+import json
+import csv
+import hashlib
+import tempfile
+from pathlib import Path
 import plotly.express as px
+import streamlit.components.v1 as components
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
@@ -481,12 +489,21 @@ def load_data():
     try:
         patients_df = pd.read_csv("patients.csv")
         schedule_df = pd.read_excel("doctor_schedule.xlsx")
-        return patients_df, schedule_df
+        # Try to load a separate video schedule; fall back to empty DataFrame if missing
+        try:
+            video_schedule_df = pd.read_excel("doctor_video_schedule.xlsx")
+        except Exception:
+            # Fall back to CSV if XLSX is not present (makes it easy to seed sample data)
+            try:
+                video_schedule_df = pd.read_csv("doctor_video_schedule.csv")
+            except Exception:
+                video_schedule_df = pd.DataFrame()
+        return patients_df, schedule_df, video_schedule_df
     except Exception as e:
         st.error(f"Error loading data files: {str(e)}")
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-patients_df, schedule_df = load_data()
+patients_df, schedule_df, video_schedule_df = load_data()
 
 # Helper functions (from hospitalmanagement.py)
 def normalize_name(name: str) -> str:
@@ -504,7 +521,7 @@ def normalize_dob(dob: str) -> str:
 # AI Symptom Checker Function (from hospitalmanagement.py)
 def ai_symptom_checker(symptoms_text):
     """AI-based symptom analysis using LangChain + Google GenAI"""
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", api_key="AIzaSyDLe5OQ7_7iplT5EHrreg7MKfDiQ2Bl0Ww")
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", api_key="")
     prompt = f"""
 You are a helpful medical assistant. A patient described the following symptoms:
 
@@ -524,97 +541,82 @@ Respond clearly in simple terms.
         return f"Error fetching AI response: {str(e)}"
 
 # Email Confirmation Function
-def send_appointment_confirmation(patient_email, patient_name, doctor_name, appointment_slot, insurance_carrier):
-    """Send appointment confirmation email to patient"""
+def send_appointment_confirmation(patient_email, patient_name, doctor_name, appointment_slot, insurance_carrier, consult_type='In-person', room=None):
+    """Send appointment confirmation email to patient.
+
+    Parameters:
+    - consult_type: 'Video' or 'In-person' (string)
+    - room: optional video room URL or room name when consult_type is Video
+    """
     try:
-        # Email configuration
-        smtp_server = "smtp.gmail.com"
-        smtp_port = 587
-        sender_email = "bharathreddyn6@gmail.com"
-        sender_password = "zjjn uqcb cobd qhih"
-        
-        if not sender_password:
+        # Email configuration via environment variables for safety
+        smtp_server = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
+        smtp_port = int(os.getenv('SMTP_PORT', 587))
+        sender_email = ""
+        sender_password = ""
+
+        if not sender_email or not sender_password:
+            # Email credentials not configured
+            print('Email not sent: missing SENDER_EMAIL or SENDER_PASSWORD environment variables')
             return False
-        
-        # Create message
+
+        # Build the message
         msg = MIMEMultipart()
         msg['From'] = sender_email
         msg['To'] = patient_email
         msg['Subject'] = "🏥 Appointment Confirmation - MediCare Plus"
-        
-        # HTML email body
-        html_body = f"""
-        <html>
-            <head>
-                <style>
-                    body {{ font-family: 'Arial', sans-serif; line-height: 1.6; color: #333; }}
-                    .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                             color: white; padding: 20px; text-align: center; border-radius: 10px 10px 0 0; }}
-                    .content {{ padding: 20px; background: #f9f9f9; }}
-                    .appointment-details {{ background: white; padding: 20px; border-radius: 10px; 
-                                          margin: 20px 0; border-left: 4px solid #667eea; }}
-                    .footer {{ background: #2d3748; color: white; padding: 15px; text-align: center; 
-                             border-radius: 0 0 10px 10px; font-size: 12px; }}
-                    .highlight {{ color: #667eea; font-weight: bold; }}
-                </style>
-            </head>
-            <body>
-                <div style="max-width: 600px; margin: 0 auto; border-radius: 10px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.1);">
-                    <div class="header">
-                        <h1>🏥 MediCare Plus</h1>
-                        <h2>Appointment Confirmation</h2>
-                    </div>
-                    
-                    <div class="content">
-                        <p>Dear <span class="highlight">{patient_name}</span>,</p>
-                        
-                        <p>Your appointment has been <strong>successfully confirmed</strong>! We're looking forward to providing you with excellent healthcare.</p>
-                        
-                        <div class="appointment-details">
-                            <h3>📅 Appointment Details</h3>
-                            <p><strong>Patient:</strong> {patient_name}</p>
-                            <p><strong>Doctor:</strong> Dr. {doctor_name}</p>
-                            <p><strong>Date & Time:</strong> {appointment_slot}</p>
-                            <p><strong>Insurance:</strong> {insurance_carrier}</p>
-                        </div>
-                        
-                        <div style="background: #e8f4fd; padding: 15px; border-radius: 8px; margin: 20px 0;">
-                            <h4>📋 Important Reminders:</h4>
-                            <ul>
-                                <li>Please arrive 15 minutes before your appointment</li>
-                                <li>Bring a valid ID and insurance card</li>
-                                <li>Bring a list of current medications</li>
-                                <li>If you need to cancel or reschedule, please contact us 24 hours in advance</li>
-                            </ul>
-                        </div>
-                        
-                        <p>If you have any questions or need to make changes to your appointment, please don't hesitate to contact us.</p>
-                        
-                        <p>Thank you for choosing MediCare Plus!</p>
-                    </div>
-                    
-                    <div class="footer">
-                        <p><strong>MediCare Plus Healthcare</strong></p>
-                        <p>📞 +1 (555) 123-4567 | 📧 contact@medicareplus.com</p>
-                        <p>📍 123 Healthcare Ave, Medical City</p>
-                    </div>
-                </div>
-            </body>
-        </html>
-        """
-        
+
+        # Tailor body for video consults
+        if str(consult_type).lower().startswith('video'):
+            jitsi_domain = os.getenv('JITSI_DOMAIN', 'meet.jit.si')
+            if room and not room.startswith('http'):
+                room_url = f"https://{jitsi_domain}/{room}"
+            else:
+                room_url = room or f"https://{jitsi_domain}/"
+
+            html_body = f"""
+            <html>
+                <body style="font-family: Arial, sans-serif; color: #333;">
+                    <h2>🏥 MediCare Plus — Video Appointment Confirmed</h2>
+                    <p>Hi {patient_name},</p>
+                    <p>Your video consultation with <strong>Dr. {doctor_name}</strong> is confirmed for <strong>{appointment_slot}</strong>.</p>
+                    <p>Join the secure video room at the scheduled time using the link below:</p>
+                    <p><a href="{room_url}">{room_url}</a></p>
+                    <p>Tips before joining:</p>
+                    <ul>
+                        <li>Use Chrome or Firefox for best experience.</li>
+                        <li>Ensure a stable internet connection and a quiet space.</li>
+                        <li>Grant camera and microphone permissions when prompted.</li>
+                    </ul>
+                    <p>If you consent to recording for your medical record, please agree when the session starts.</p>
+                    <p>Regards,<br/>MediCare Plus</p>
+                </body>
+            </html>
+            """
+        else:
+            html_body = f"""
+            <html>
+                <body style="font-family: Arial, sans-serif; color: #333;">
+                    <h2>🏥 MediCare Plus — Appointment Confirmed</h2>
+                    <p>Hi {patient_name},</p>
+                    <p>Your appointment with <strong>Dr. {doctor_name}</strong> is confirmed for <strong>{appointment_slot}</strong>.</p>
+                    <p>Insurance: {insurance_carrier}</p>
+                    <p>Please arrive 15 minutes early and bring your ID and insurance card.</p>
+                    <p>Regards,<br/>MediCare Plus</p>
+                </body>
+            </html>
+            """
+
         msg.attach(MIMEText(html_body, 'html'))
-        
-        # Send email
+
         with smtplib.SMTP(smtp_server, smtp_port) as server:
             server.starttls()
             server.login(sender_email, sender_password)
             server.send_message(msg)
-        
+
         return True
-        
     except Exception as e:
-        print(f"Email sending error: {str(e)}")
+        print(f"Email sending error: {e}")
         return False
 
 # Patient Login System
@@ -760,6 +762,98 @@ def patient_login_system():
     
     st.markdown('</div>', unsafe_allow_html=True)
 
+
+def doctor_login_system():
+    """Simple doctor login. In production replace with proper authentication."""
+    st.markdown('<div class="container section">', unsafe_allow_html=True)
+    st.markdown('<h1 style="text-align: center; margin-bottom: 2rem; color: #2d3748;">👩‍⚕️ Doctor Login</h1>', unsafe_allow_html=True)
+
+    if 'doctor_logged_in' not in st.session_state:
+        st.session_state.doctor_logged_in = False
+        st.session_state.doctor_name = ''
+
+    if not st.session_state.doctor_logged_in:
+        with st.form('doctor_login'):
+            doc_name = st.text_input('Doctor Name (as in schedule):', placeholder='e.g., Dr. Smith')
+            password = st.text_input('Password:', type='password', placeholder='doctor123')
+            submitted = st.form_submit_button('Login', type='primary')
+            if submitted:
+                if doc_name and password:
+                    # simple check: doctor must appear in one of the schedules
+                    known_doctors = set()
+                    try:
+                        sd = pd.read_excel('doctor_schedule.xlsx')
+                        known_doctors.update(sd['doctor'].unique())
+                    except Exception:
+                        pass
+                    try:
+                        vsd = pd.read_excel('doctor_video_schedule.xlsx')
+                        known_doctors.update(vsd['doctor'].unique())
+                    except Exception:
+                        # try CSV fallback
+                        try:
+                            vsd = pd.read_csv('doctor_video_schedule.csv')
+                            known_doctors.update(vsd['doctor'].unique())
+                        except Exception:
+                            pass
+
+                    if doc_name in known_doctors and password == 'doctor123':
+                        st.session_state.doctor_logged_in = True
+                        st.session_state.doctor_name = doc_name
+                        st.success('✅ Login successful!')
+                        st.rerun()
+                    else:
+                        st.error('Invalid doctor name or password (use doctor123 in demo).')
+    else:
+        doctor_dashboard()
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+def doctor_dashboard():
+    """Doctor dashboard showing upcoming video consults and a Join button."""
+    st.markdown(f"<div class=\"alert alert-success\">👩‍⚕️ Logged in as <strong>{st.session_state.get('doctor_name','')}</strong></div>", unsafe_allow_html=True)
+
+    try:
+        appointments_df = pd.read_excel('appointments.xlsx')
+    except Exception:
+        st.error('No appointments file found.')
+        return
+
+    doctor_name = st.session_state.get('doctor_name', '')
+    if not doctor_name:
+        st.error('No doctor logged in.')
+        return
+
+    # Show upcoming video appointments for this doctor
+    video_appts = appointments_df[ (appointments_df['doctor'] == doctor_name) & (appointments_df.get('consult_type','').str.lower().str.contains('video')) ]
+    if video_appts.empty:
+        st.info('No upcoming video consults found.')
+    else:
+        st.markdown('## 📅 Upcoming Video Consults')
+        for idx, appt in video_appts.iterrows():
+            with st.expander(f"{appt.get('slot','')} - {appt.get('name','')} ({appt.get('email','')})"):
+                st.write(f"Patient: {appt.get('name','')}")
+                st.write(f"Email: {appt.get('email','')}")
+                st.write(f"Slot: {appt.get('slot','')}")
+                room = get_video_room_name(appt)
+                st.markdown(f"**Room:** `{room}`")
+                consent = st.checkbox('I have patient consent to record (if applicable)', key=f'doc_consent_{idx}')
+                if st.button('▶️ Join as Doctor', key=f'doc_join_{idx}'):
+                    # Save metadata and embed Jitsi
+                    save_video_session_metadata(room, appt, started_by='doctor', consent=bool(consent))
+                    jitsi_domain = os.getenv('JITSI_DOMAIN','meet.jit.si')
+                    jitsi_url = f"https://{jitsi_domain}/{room}"
+                    st.info('Opening embedded video session below. You may also open in a new tab.')
+                    st.markdown(f"[Open in new tab]({jitsi_url})")
+                    components.iframe(jitsi_url, height=720)
+
+    # Logout
+    if st.button('🚪 Logout as Doctor'):
+        st.session_state.doctor_logged_in = False
+        st.session_state.doctor_name = ''
+        st.rerun()
+
 def patient_dashboard():
     """Patient dashboard after successful login"""
     st.markdown(f"""
@@ -823,7 +917,37 @@ def show_patient_appointments():
                     with col2:
                         st.write(f"**Insurance:** {appointment.get('insurance_carrier', 'Self-Pay')}")
                         st.write(f"**Status:** Scheduled")
-                        
+                        # If this appointment was booked as a video consult, show video actions
+                        consult_modality = str(appointment.get('consult_type', appointment.get('visit_type', ''))).lower()
+                        if 'video' in consult_modality:
+                            # Video consultation actions
+                            room = get_video_room_name(appointment)
+                            st.markdown(f"**🔗 Room:** `{room}`")
+                            consent = st.checkbox("I consent to session recording (for medical records)", key=f"consent_{idx}")
+                            if st.button(f"▶️ Join Video Consult", key=f"join_video_{idx}"):
+                                # save metadata and open embedded Jitsi
+                                save_video_session_metadata(room, appointment, started_by='patient', consent=bool(consent))
+                                jitsi_domain = os.getenv('JITSI_DOMAIN', 'meet.jit.si')
+                                jitsi_url = f"https://{jitsi_domain}/{room}"
+                                st.info("Opening embedded video session below — you can also open in a new tab.")
+                                st.markdown(f"[Open video in new tab]({jitsi_url})")
+                                components.iframe(jitsi_url, height=700)
+
+                            # Prescription request (patient can request a prescription from doctor)
+                            if st.button(f"📝 Request Prescription", key=f"request_rx_{idx}"):
+                                with st.form(f"rx_form_{idx}"):
+                                    meds = st.text_area("Enter medications and dosages (one per line):", height=120)
+                                    notes = st.text_area("Additional notes for doctor:")
+                                    if st.form_submit_button("Send Request to Doctor"):
+                                        # Save a simple request to disk for the clinic to process
+                                        requests_dir = Path('rx_requests')
+                                        requests_dir.mkdir(exist_ok=True)
+                                        req_path = requests_dir / f"rx_request_{appointment['email']}_{datetime.now().strftime('%Y%m%d%H%M%S')}.txt"
+                                        with open(req_path, 'w', encoding='utf-8') as f:
+                                            f.write(f"Patient: {appointment.get('name','')}\nEmail: {appointment.get('email','')}\nDoctor: {appointment.get('doctor','')}\nSlot: {appointment.get('slot','')}\n\nMedications:\n{meds}\n\nNotes:\n{notes}\n")
+                                        st.success("✅ Prescription request sent to clinic. A doctor will review and send the prescription.")
+                        else:
+                            st.info("This appointment is scheduled as an in-person visit. To have a video consult, please book a 'Video Consult' appointment.")
                         if st.button(f"❌ Cancel Appointment", key=f"cancel_patient_{idx}"):
                             # Remove appointment
                             appointments_df = appointments_df.drop(idx)
@@ -930,6 +1054,131 @@ def show_patient_profile():
     except FileNotFoundError:
         st.error("❌ Patient database not found.")
 
+# ------------------------
+# Video Consultation Helpers
+# ------------------------
+
+SESSIONS_FILE = Path("video_sessions.csv")
+PRESCRIPTIONS_DIR = Path("prescriptions")
+PRESCRIPTIONS_DIR.mkdir(exist_ok=True)
+
+def get_video_room_name(appointment_row):
+    """Generate a stable, obfuscated room name for a video session."""
+    base = f"{appointment_row.get('email','unknown')}|{appointment_row.get('doctor','doc')}|{appointment_row.get('slot','') }"
+    h = hashlib.sha1(base.encode('utf-8')).hexdigest()[:16]
+    return f"medicare-{h}"
+
+def save_video_session_metadata(room, appointment_row, started_by='patient', consent=False, recording_url=''):
+    """Append session metadata to CSV for administrative records."""
+    header = ['room','patient_email','patient_name','doctor','slot','started_by','consent','recording_url','started_at']
+    row = {
+        'room': room,
+        'patient_email': appointment_row.get('email',''),
+        'patient_name': appointment_row.get('name',''),
+        'doctor': appointment_row.get('doctor',''),
+        'slot': appointment_row.get('slot',''),
+        'started_by': started_by,
+        'consent': consent,
+        'recording_url': recording_url,
+        'started_at': datetime.now().isoformat()
+    }
+    write_header = not SESSIONS_FILE.exists()
+    with open(SESSIONS_FILE, 'a', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=header)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+def generate_prescription_pdf(patient_name, doctor_name, medications, notes=''):
+    """Generate a simple prescription PDF and return path."""
+    filename = PRESCRIPTIONS_DIR / f"prescription_{patient_name.replace(' ','_')}_{datetime.now().strftime('%Y%m%d%H%M%S')}.pdf"
+    c = canvas.Canvas(str(filename), pagesize=letter)
+    width, height = letter
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(40, height - 60, "MediCare Plus - Prescription")
+    c.setFont("Helvetica", 12)
+    c.drawString(40, height - 90, f"Patient: {patient_name}")
+    c.drawString(40, height - 110, f"Prescribed by: Dr. {doctor_name}")
+    c.drawString(40, height - 130, f"Date: {datetime.now().strftime('%Y-%m-%d')}")
+    y = height - 170
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(40, y, "Medications:")
+    c.setFont("Helvetica", 11)
+    y -= 20
+    for med in medications:
+        c.drawString(60, y, f"- {med}")
+        y -= 18
+        if y < 80:
+            c.showPage()
+            y = height - 60
+    if notes:
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(40, y, "Notes:")
+        y -= 20
+        c.setFont("Helvetica", 11)
+        c.drawString(60, y, notes)
+    c.showPage()
+    c.save()
+    return str(filename)
+
+def send_prescription_email(patient_email, patient_name, prescription_path):
+    """Send prescription PDF to patient via email."""
+    try:
+        smtp_server = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
+        smtp_port = int(os.getenv('SMTP_PORT', 587))
+        sender_email = ""
+        sender_password = ""
+        if not sender_password:
+            return False
+
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = patient_email
+        msg['Subject'] = '📝 Your Prescription from MediCare Plus'
+
+        body = f"Dear {patient_name},\n\nPlease find attached your prescription. Contact us if you have any questions.\n\nRegards,\nMediCare Plus"
+        msg.attach(MIMEText(body, 'plain'))
+
+        with open(prescription_path, 'rb') as f:
+            part = MIMEApplication(f.read(), Name=Path(prescription_path).name)
+            part['Content-Disposition'] = f'attachment; filename="{Path(prescription_path).name}"'
+            msg.attach(part)
+
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(sender_email, sender_password)
+            server.send_message(msg)
+        return True
+    except Exception as e:
+        print(f"Prescription email error: {e}")
+        return False
+
+# ------------------------
+# Admin video sessions view
+# ------------------------
+
+def admin_video_sessions():
+    st.markdown('## 🎥 Video Sessions & Recordings')
+    if not SESSIONS_FILE.exists():
+        st.info('No video sessions recorded yet.')
+        return
+    df = pd.read_csv(SESSIONS_FILE)
+    st.dataframe(df, use_container_width=True)
+    # Allow admin to mark recording URL or upload recording
+    for idx, row in df.iterrows():
+        with st.expander(f"Session: {row['room']} - {row['patient_name']} - {row['doctor']}"):
+            st.write(row.to_dict())
+            uploaded = st.file_uploader(f"Upload recording for {row['room']}", type=['mp4','webm'], key=f"upload_{idx}")
+            if uploaded:
+                recordings_dir = Path('recordings')
+                recordings_dir.mkdir(exist_ok=True)
+                save_path = recordings_dir / f"{row['room']}_{uploaded.name}"
+                with open(save_path, 'wb') as f:
+                    f.write(uploaded.getbuffer())
+                st.success('Recording uploaded and attached to session.')
+                # update CSV (not implemented complex update to keep simple)
+                st.info(f'Recording saved at {save_path}')
+
 # Admin functions (from hospitalmanagement.py)
 def admin_login():
     st.markdown('<div class="container section">', unsafe_allow_html=True)
@@ -968,14 +1217,16 @@ def create_admin_dashboard():
         admin_login()
         return
 
-    # Main admin interface with tabs
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    # Main admin interface with tabs (includes Video Sessions)
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📊 Dashboard Overview", 
         "📅 Appointment Management", 
         "👨‍⚕️ Doctor Schedule",
+        "👨‍⚕️ Video Schedule",
         "👥 Patient Management", 
         "📈 Analytics & Reports", 
-        "⚙️ System Settings"
+        "⚙️ System Settings",
+        "🎥 Video Sessions"
     ])
 
     with tab1:
@@ -988,13 +1239,19 @@ def create_admin_dashboard():
         doctor_schedule_management()
 
     with tab4:
-        patient_management()
+        doctor_video_schedule_management()
 
     with tab5:
-        analytics_reports()
+        patient_management()
 
     with tab6:
+        analytics_reports()
+
+    with tab7:
         system_settings()
+
+    with tab8:
+        admin_video_sessions()
     
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1181,18 +1438,28 @@ def appointment_management():
 
                     with col2_2:
                         if st.button("📧 Email", key=f"email_{idx}"):
-                            # Send reminder email
-                            email_sent = send_appointment_confirmation(
-                                appointment['email'],
-                                appointment['name'],
-                                appointment['doctor'],
-                                appointment['slot'],
-                                appointment.get('insurance_carrier', 'Self-Pay')
-                            )
-                            if email_sent:
-                                st.success("📧 Reminder sent!")
-                            else:
-                                st.warning("📧 Email service unavailable")
+                                # Send reminder email (include video room when applicable)
+                                consult = str(appointment.get('consult_type', appointment.get('visit_type', 'In-person')))
+                                room = None
+                                try:
+                                    if 'video' in consult.lower():
+                                        room = get_video_room_name(appointment)
+                                except Exception:
+                                    room = None
+
+                                email_sent = send_appointment_confirmation(
+                                    appointment['email'],
+                                    appointment['name'],
+                                    appointment['doctor'],
+                                    appointment['slot'],
+                                    appointment.get('insurance_carrier', 'Self-Pay'),
+                                    consult_type=consult,
+                                    room=room
+                                )
+                                if email_sent:
+                                    st.success("📧 Reminder sent!")
+                                else:
+                                    st.warning("📧 Email service unavailable")
 
         # Bulk operations
         st.markdown("### 📊 Bulk Operations")
@@ -1342,6 +1609,72 @@ def doctor_schedule_management():
 
     except Exception as e:
         st.error(f"❌ Error managing doctor schedule: {str(e)}")
+
+
+def doctor_video_schedule_management():
+    """Management UI for doctor video consult schedules (separate Excel file)."""
+    st.markdown("## 👨‍⚕️ Video Consult Schedule Management")
+    try:
+        # Try to load the video schedule file; if missing create empty DataFrame
+        try:
+            video_df = pd.read_excel("doctor_video_schedule.xlsx")
+        except Exception:
+            video_df = pd.DataFrame(columns=["doctor", "date", "time_slot", "status"])
+
+        # Doctor selection
+        selected_doctor = st.selectbox("👨‍⚕️ Select Doctor:", video_df['doctor'].unique() if not video_df.empty else ["No doctors yet"]) if not video_df.empty else st.text_input("Doctor name (first entry):")
+
+        st.markdown("### Current Video Schedule")
+        if not video_df.empty:
+            st.dataframe(video_df, use_container_width=True)
+        else:
+            st.info("No video schedule data found. Use the form below to add slots.")
+
+        # Add new video slot
+        with st.expander("➕ Add New Video Slot"):
+            with st.form("add_video_slot"):
+                v_doctor = st.text_input("Doctor Name:")
+                v_date = st.date_input("Date:")
+                v_time = st.time_input("Time:")
+                v_status = st.selectbox("Status:", ["Available", "Booked", "Unavailable"])
+
+                if st.form_submit_button("Add Video Slot", type="primary"):
+                    new_slot = pd.DataFrame([{
+                        'doctor': v_doctor,
+                        'date': v_date.strftime('%Y-%m-%d'),
+                        'time_slot': v_time.strftime('%H:%M'),
+                        'status': v_status
+                    }])
+                    updated = pd.concat([video_df, new_slot], ignore_index=True)
+                    updated.to_excel("doctor_video_schedule.xlsx", index=False)
+                    st.success("✅ Video slot added successfully!")
+                    st.rerun()
+
+        # Quick bulk create
+        if st.button("📅 Generate Weekly Video Slots"):
+            start_date = datetime.now().date()
+            time_slots = ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00"]
+            new_slots = []
+            doctor_list = video_df['doctor'].unique() if not video_df.empty else [selected_doctor] if selected_doctor else []
+            for doc in doctor_list:
+                for i in range(7):
+                    current_date = start_date + timedelta(days=i)
+                    for t in time_slots:
+                        new_slots.append({
+                            'doctor': doc,
+                            'date': current_date.strftime('%Y-%m-%d'),
+                            'time_slot': t,
+                            'status': 'Available'
+                        })
+            if new_slots:
+                new_df = pd.DataFrame(new_slots)
+                updated = pd.concat([video_df, new_df], ignore_index=True)
+                updated.to_excel("doctor_video_schedule.xlsx", index=False)
+                st.success("✅ Weekly video schedule generated!")
+                st.rerun()
+
+    except Exception as e:
+        st.error(f"Error loading video schedule data: {str(e)}")
 
 def patient_management():
     """Comprehensive patient management with search and editing"""
@@ -2087,7 +2420,7 @@ def dashboard_overview():
     st.markdown('</div>', unsafe_allow_html=True)
 
 # Navigation handling (modern buttons)
-col1, col2, col3, col4, col5 = st.columns(5)
+col1, col2, col3, col4, col5, col6 = st.columns(6)
 with col1:
     if st.button("🏠 Home", key="nav_home"):
         st.session_state.current_page = 'home'
@@ -2098,9 +2431,12 @@ with col3:
     if st.button("🔍 Symptoms", key="nav_symptoms"):
         st.session_state.current_page = 'symptoms'
 with col4:
-    if st.button("👤 Portal", key="nav_portal"):
+    if st.button("👤 Patient Portal", key="nav_portal"):
         st.session_state.current_page = 'login'
 with col5:
+    if st.button("👩‍⚕️ Doctor", key="nav_doctor"):
+        st.session_state.current_page = 'doctor'
+with col6:
     if st.button("🔐 Admin", key="nav_admin"):
         st.session_state.current_page = 'admin'
 
@@ -2282,43 +2618,67 @@ elif st.session_state.current_page == 'booking':
         st.markdown('<div class="card" style="max-width: 800px; margin: 0 auto;">', unsafe_allow_html=True)
         st.markdown("### Step 2: Choose Your Doctor & Appointment Time")
         
-        col1, col2 = st.columns([1, 1])
+        # Let the patient choose whether this is an in-person visit or a video consult
+        col0, col1, col2 = st.columns([1, 1, 1])
+        with col0:
+            consult_choice = st.selectbox("Visit Type:", ["In-person", "Video Consult"], index=0)
 
+        # Select doctor and available slots from the appropriate schedule
         with col1:
             st.markdown("#### Select Your Doctor")
-            doctors = schedule_df["doctor"].unique().tolist()
-            selected_doctor = st.selectbox("Available Doctors", doctors)
+            # choose schedule source depending on consult type
+            if consult_choice == "Video Consult":
+                schedule_source = video_schedule_df if not video_schedule_df.empty else pd.DataFrame()
+            else:
+                schedule_source = schedule_df if not schedule_df.empty else pd.DataFrame()
+
+            if schedule_source.empty:
+                st.error("No schedule data available for the selected visit type. Please try another type or contact support.")
+                selected_doctor = None
+            else:
+                doctors = schedule_source["doctor"].unique().tolist()
+                selected_doctor = st.selectbox("Available Doctors", doctors)
 
         with col2:
             st.markdown("#### Available Time Slots")
-            available_slots = schedule_df[
-                (schedule_df["doctor"] == selected_doctor) & 
-                (schedule_df["status"] == "Available")
-            ].reset_index(drop=True)
-
-            if available_slots.empty:
-                st.error(f"No available slots for Dr. {selected_doctor}")
+            if selected_doctor is None:
                 selected_slot = None
             else:
-                slot_options = []
-                for i, row in available_slots.head(10).iterrows():
-                    slot_options.append(f"{row['date']} {row['time_slot']}")
+                available_slots = schedule_source[
+                    (schedule_source["doctor"] == selected_doctor) & 
+                    (schedule_source.get("status", pd.Series([])) == "Available")
+                ].reset_index(drop=True)
 
-                selected_slot_display = st.selectbox("Choose Your Preferred Time", slot_options)
-                if selected_slot_display:
-                    selected_slot_idx = slot_options.index(selected_slot_display)
-                    selected_slot = available_slots.iloc[selected_slot_idx]
-                else:
+                if available_slots.empty:
+                    st.error(f"No available slots for Dr. {selected_doctor} in the selected schedule")
                     selected_slot = None
+                else:
+                    slot_options = []
+                    for i, row in available_slots.head(20).iterrows():
+                        # support both date/time or date + time_slot formats
+                        if 'time_slot' in row.index:
+                            slot_options.append(f"{row['date']} {row['time_slot']}")
+                        else:
+                            # fallback: try to join available columns
+                            slot_options.append(str(row.values))
+
+                    selected_slot_display = st.selectbox("Choose Your Preferred Time", slot_options)
+                    if selected_slot_display:
+                        selected_slot_idx = slot_options.index(selected_slot_display)
+                        selected_slot = available_slots.iloc[selected_slot_idx]
+                    else:
+                        selected_slot = None
 
         if st.button("Continue to Insurance Details", type="primary"):
-            if selected_slot is not None:
+            if selected_slot is not None and selected_doctor is not None:
                 st.session_state.patient_data['doctor'] = selected_doctor
                 st.session_state.patient_data['slot'] = selected_slot_display
+                # Persist the consult modality separately from the 'visit_type' (new/returning)
+                st.session_state.patient_data['consult_type'] = 'Video' if consult_choice == 'Video Consult' else 'In-person'
                 st.session_state.step = 3
                 st.rerun()
             else:
-                st.error("Please select a time slot")
+                st.error("Please select a time slot and doctor")
         
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -2392,6 +2752,7 @@ elif st.session_state.current_page == 'booking':
                     "slot": st.session_state.patient_data["slot"],
                     "insurance_carrier": st.session_state.patient_data.get('insurance', {}).get("carrier", ""),
                     "email": st.session_state.patient_data["email"]
+                    ,"consult_type": st.session_state.patient_data.get('consult_type', 'In-person')
                 }])
 
                 try:
@@ -2402,13 +2763,29 @@ elif st.session_state.current_page == 'booking':
 
                 all_appts.to_excel("appointments.xlsx", index=False)
                 
-                # Send email confirmation
+                # Send email confirmation (include video room when applicable)
+                consult = st.session_state.patient_data.get('consult_type', 'In-person')
+                room = None
+                if str(consult).lower().startswith('video'):
+                    appt_for_room = {
+                        'email': st.session_state.patient_data.get('email',''),
+                        'doctor': st.session_state.patient_data.get('doctor',''),
+                        'slot': st.session_state.patient_data.get('slot',''),
+                        'name': st.session_state.patient_data.get('name','')
+                    }
+                    try:
+                        room = get_video_room_name(appt_for_room)
+                    except Exception:
+                        room = None
+
                 email_sent = send_appointment_confirmation(
                     st.session_state.patient_data["email"],
                     st.session_state.patient_data["name"],
                     st.session_state.patient_data["doctor"],
                     st.session_state.patient_data["slot"],
-                    st.session_state.patient_data.get('insurance', {}).get("carrier", "Self-Pay")
+                    st.session_state.patient_data.get('insurance', {}).get("carrier", "Self-Pay"),
+                    consult_type=consult,
+                    room=room
                 )
                 
                 if email_sent:
@@ -2485,6 +2862,9 @@ elif st.session_state.current_page == 'symptoms':
 
 elif st.session_state.current_page == 'login':
     patient_login_system()
+
+elif st.session_state.current_page == 'doctor':
+    doctor_login_system()
 
 elif st.session_state.current_page == 'admin':
     create_admin_dashboard()

@@ -1,0 +1,2 @@
+room,patient_email,patient_name,doctor,slot,started_by,consent,recording_url,started_at
+medicare-d577029876010492,bharath@gmail.com,bharath,Dr. Swamy,2025-09-05 09:00-09:30,patient,False,,2025-10-24T16:58:53.141456
