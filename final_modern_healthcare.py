@@ -18,6 +18,7 @@ import os
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from langchain_google_genai import ChatGoogleGenerativeAI
+from chatbot_module import Chatbot
 
 # Load environment variables
 load_dotenv()
@@ -39,6 +40,41 @@ if 'booking_step' not in st.session_state:
     st.session_state.booking_step = 1
 if 'patient_data' not in st.session_state:
     st.session_state.patient_data = {}
+
+
+def safe_rerun():
+    """Attempt to programmatically rerun the Streamlit script with fallbacks.
+
+    Uses st.experimental_rerun() if available. If not, updates query params
+    to force a rerun. As a last resort, sets a session flag and stops the script.
+    """
+    try:
+        if hasattr(st, 'experimental_rerun'):
+            # Use Streamlit's rerun when available
+            st.experimental_rerun()
+            return
+    except Exception:
+        pass
+
+    # Fallback: change query params to force Streamlit to treat this as a new run
+    try:
+        # Newer Streamlit exposes query params via `st.query_params` (assignable dict-like)
+        if hasattr(st, 'query_params'):
+            try:
+                st.query_params = {'_rerun': datetime.now().isoformat()}
+                return
+            except Exception:
+                # older versions may not allow assignment; ignore and continue to stop fallback
+                pass
+    except Exception:
+        pass
+
+    # Last resort: set a flag and stop execution (user can refresh)
+    st.session_state['_rerun_requested'] = st.session_state.get('_rerun_requested', 0) + 1
+    try:
+        st.stop()
+    except Exception:
+        return
 
 # Modern CSS with Hamburger Menu
 st.markdown("""
@@ -526,7 +562,7 @@ def ai_symptom_checker(symptoms_text):
 You are a helpful medical assistant. A patient described the following symptoms:
 
 {symptoms_text}  
-
+  
 Please provide:
 1. A short summary of the symptoms
 2. Possible conditions (not a diagnosis)
@@ -864,7 +900,7 @@ def patient_dashboard():
     """, unsafe_allow_html=True)
     
     # Patient Navigation
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
         if st.button("📅 My Appointments", type="primary", use_container_width=True):
@@ -885,6 +921,10 @@ def patient_dashboard():
             st.session_state.patient_name = ""
             st.rerun()
 
+    with col5:
+        if st.button("💬 Chat with Assistant", type="primary", use_container_width=True):
+            st.session_state.patient_section = 'chat'
+
     # Patient section content
     if 'patient_section' not in st.session_state:
         st.session_state.patient_section = 'appointments'
@@ -895,6 +935,8 @@ def patient_dashboard():
         show_patient_records()
     elif st.session_state.patient_section == 'profile':
         show_patient_profile()
+    elif st.session_state.patient_section == 'chat':
+        show_patient_chat()
 
 def show_patient_appointments():
     """Display patient's appointments"""
@@ -1053,6 +1095,155 @@ def show_patient_profile():
             
     except FileNotFoundError:
         st.error("❌ Patient database not found.")
+
+
+def show_patient_chat():
+    """Chat UI for the 24/7 virtual assistant integrated into the patient dashboard."""
+    st.markdown("### 💬 MediCare Virtual Assistant")
+
+    # Instantiate chatbot
+    bot = Chatbot(data_dir='.')
+
+    # Clear chat history button
+    col_clear, _ = st.columns([1, 4])
+    with col_clear:
+        if st.button('🧹 Clear Chat History'):
+            # remove in-memory state
+            removed = []
+            for key in ['chat_history', 'chat_last_reschedule', 'chat_language']:
+                if key in st.session_state:
+                    st.session_state.pop(key, None)
+                    removed.append(key)
+            st.success(f"Cleared: {', '.join(removed) if removed else 'nothing to clear'}")
+            safe_rerun()
+
+    # Default language selection
+    if 'chat_language' not in st.session_state:
+        st.session_state.chat_language = 'en'
+
+    lang = st.selectbox('Choose language / Elija idioma / भाषा चुनें', ['en', 'es', 'hi'], index=['en','es','hi'].index(st.session_state.chat_language))
+    st.session_state.chat_language = lang
+
+    # Conversation history
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+
+    # Render history
+    for msg in st.session_state.chat_history:
+        if msg['from'] == 'user':
+            st.markdown(f"<div style='background:#e6f2ff;padding:8px;border-radius:8px;margin:6px 0;'><strong>You:</strong> {msg['text']}</div>", unsafe_allow_html=True)
+        else:
+            st.markdown(f"<div style='background:#f1f5f9;padding:8px;border-radius:8px;margin:6px 0;'><strong>Assistant:</strong> {msg['text']}</div>", unsafe_allow_html=True)
+
+    # Input area
+    with st.form('chat_send'):
+        user_msg = st.text_input('Type your message here', '')
+        submitted = st.form_submit_button('Send')
+
+        if submitted and user_msg:
+            # Append user message
+            st.session_state.chat_history.append({'from':'user','text':user_msg})
+
+            # Get bot response
+            resp = bot.respond(st.session_state.patient_email, user_msg, language=st.session_state.chat_language)
+
+            # Handle structured response
+            if resp.get('type') == 'text':
+                st.session_state.chat_history.append({'from':'bot','text':resp.get('text')})
+
+            elif resp.get('type') == 'reschedule_list':
+                # Show list of appointments for the patient
+                appts = resp.get('appointments', [])
+                if not appts:
+                    st.session_state.chat_history.append({'from':'bot','text':resp.get('text')})
+                else:
+                    # Build a textual list
+                    list_text = "Here are your upcoming appointments:\n"
+                    for i, a in enumerate(appts):
+                        list_text += f"{i}: Dr. {a.get('doctor','')} — {a.get('slot','')} ({a.get('visit_type','')})\n"
+                    st.session_state.chat_history.append({'from':'bot','text':list_text})
+                    # Store last reschedule candidates
+                    st.session_state.chat_last_reschedule = appts
+
+            else:
+                st.session_state.chat_history.append({'from':'bot','text':resp.get('text', '')})
+
+            safe_rerun()
+
+    # If there are reschedule candidates, render rescheduling UI
+    if 'chat_last_reschedule' in st.session_state and st.session_state.chat_last_reschedule:
+        st.markdown('---')
+        st.markdown('### 🗓️ Reschedule an Appointment')
+        candidates = st.session_state.chat_last_reschedule
+        # Show summary
+        for i, c in enumerate(candidates):
+            st.write(f"{i}: Dr. {c.get('doctor','')} — {c.get('slot','')}")
+
+        sel = st.number_input('Select appointment number to reschedule', min_value=0, max_value=max(0, len(candidates)-1), value=0)
+        new_date = st.date_input('New date')
+        new_time = st.time_input('New time')
+        if st.button('🔁 Submit Reschedule'):
+            new_slot = f"{new_date.strftime('%Y-%m-%d')} {new_time.strftime('%H:%M')}"
+            ok, msg = bot.request_reschedule(st.session_state.patient_email, int(sel), new_slot)
+            st.session_state.chat_history.append({'from':'bot','text':msg})
+            # clear candidates on success
+            if ok:
+                st.session_state.chat_last_reschedule = []
+            safe_rerun()
+
+    st.markdown('---')
+    st.markdown('### 💊 Medication Reminders')
+    with st.form('med_reminder'):
+        med = st.text_input('Medication name (e.g., Aspirin)')
+        times = st.text_input('Times (comma separated, 24h e.g. 08:00,20:00)')
+        if st.form_submit_button('Set Reminder'):
+            if med and times:
+                ok, msg = bot.schedule_medication_reminder(st.session_state.patient_email, med, times)
+                st.session_state.chat_history.append({'from':'bot','text':msg})
+                safe_rerun()
+            else:
+                st.warning('Please enter medication name and times.')
+
+    st.markdown('---')
+    if st.button('💡 Give me a quick health tip'):
+        tip = bot.get_health_tip(st.session_state.chat_language)
+        st.session_state.chat_history.append({'from':'bot','text':tip})
+        safe_rerun()
+
+    # Small help text
+    st.info('You can ask me to reschedule appointments, set medication reminders, or request quick health tips. For rescheduling, type "reschedule" or "change appointment".')
+
+
+def clear_chat_history(patient_email: str = None, remove_persisted: bool = False):
+    """Clear chat history from session state and optionally remove persisted logs.
+
+    This is a top-level helper you can call programmatically.
+    """
+    removed = []
+    for key in ['chat_history', 'chat_last_reschedule', 'chat_language']:
+        if key in st.session_state:
+            st.session_state.pop(key, None)
+            removed.append(key)
+
+    if remove_persisted:
+        logs_dir = Path('chat_logs')
+        if logs_dir.exists() and logs_dir.is_dir():
+            if patient_email:
+                target = logs_dir / f"chat_{patient_email}.json"
+                if target.exists():
+                    try:
+                        target.unlink()
+                    except Exception:
+                        pass
+            else:
+                for f in logs_dir.iterdir():
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+
+    return removed
+
 
 # ------------------------
 # Video Consultation Helpers
